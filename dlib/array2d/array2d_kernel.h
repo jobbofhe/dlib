@@ -72,7 +72,7 @@ namespace dlib
                         - (*this)[x] == data[x]
             !*/
 
-            friend class array2d<T,mem_manager>;
+            friend class array2d;
             friend class row_helper;
 
         public:
@@ -133,7 +133,9 @@ namespace dlib
             nr_(0),
             cur(0),
             last(0),
-            at_start_(true)
+            at_start_(true),
+            shadow(false),
+            sr_(0)
         {
         }
 
@@ -146,7 +148,9 @@ namespace dlib
             nr_(0),
             cur(0),
             last(0),
-            at_start_(true)
+            at_start_(true),
+            shadow(false),
+            sr_(0)
         {
             // make sure requires clause is not broken
             DLIB_ASSERT((cols >= 0 && rows >= 0),
@@ -159,9 +163,6 @@ namespace dlib
 
             set_size(rows,cols);
         }
-
-        array2d(const array2d&) = delete;        // copy constructor
-        array2d& operator=(const array2d&) = delete;    // assignment operator
 
 #ifdef DLIB_HAS_RVALUE_REFERENCES
         array2d(array2d&& item) : array2d()
@@ -230,6 +231,8 @@ namespace dlib
             exchange(cur,item.cur);
             exchange(last,item.last);
             pool.swap(item.pool);
+			exchange(shadow,item.shadow);
+			exchange(sr_,item.sr_);
         }
 
         void clear (
@@ -237,13 +240,15 @@ namespace dlib
         {
             if (data != 0)
             {
-                pool.deallocate_array(data);
+                if(!shadow) pool.deallocate_array(data);
                 nc_ = 0;
                 nr_ = 0;
                 data = 0;
                 at_start_ = true;
                 cur = 0;
                 last = 0;
+				shadow = false;
+				sr_ = 0;
             }
         }
 
@@ -321,6 +326,79 @@ namespace dlib
             return nc_*sizeof(T);
         }
 
+		void set_private_member (
+			const array2d<T>& a
+		)
+		{
+    		this->data = a.data;
+			this->nc_ = a.nc_;
+			this->nr_ = a.nr_;
+			this->last = a.last;
+			this->cur = a.cur;
+			this->at_start_ = a.at_start_;
+			this->shadow = true;
+			this->sr_ = a.sr_;
+		}
+
+		int config_by_tid (
+			int id, //id is from 0 to total_th - 1
+			int total_th, // total num of threads
+			int fnr // num of rows of the filter
+		)
+		{
+			
+			long sr = (nr_ / total_th) * id; //sr : start row. from 0 to nr_ -1
+			long er = sr + (nr_ / total_th) -1 + fnr -1; //er : end row
+			if ( id == total_th -1)
+			{
+				er = nr_ - 1;
+			}
+			if((nr_ / total_th < 1) || ((nr_ / total_th) * (total_th - 1) + fnr -2) >= nr_ )
+			{
+				//std::cout << "don't do dp" << std::endl;
+				if(id == total_th -1)
+				{
+					sr_ = 0;
+					return 0;
+				}
+				else
+				{
+					data = 0;
+					nr_ = 0;
+					last = 0;
+					at_start_ = true;
+					cur = 0;
+					sr_ = 0;
+					return -1;
+				}
+			}
+
+			data = data + sr * nc_ ;
+			nr_ = er - sr + 1;
+			last = data + nr_*nc_ - 1;
+			at_start_ = true;
+			cur = 0;
+			sr_ = sr;
+			return 0;
+		}
+
+		long offset(
+		) const
+		{
+			return sr_;
+		}
+#if 0
+		void clear_private_member (
+		)
+		{
+			this->data = 0;
+			this->nc_ = 0;
+			this->nr_ = 0;
+			this->last = 0;
+			this->cur = 0;
+			this->at_start_ = true;			
+		}
+#endif
     private:
 
 
@@ -332,10 +410,36 @@ namespace dlib
         mutable T* cur;
         T* last;
         mutable bool at_start_;
+		bool shadow;
+		long sr_;
+		
+        // restricted functions
+        array2d(array2d&);        // copy constructor
+        array2d& operator=(array2d&);    // assignment operator
 
     };
 
 // ----------------------------------------------------------------------------------------
+#if 0
+template <
+        typename T
+        >
+    class array2d_dp : public array2d<T>
+    {
+    	public:
+
+		array2d_dp(){}
+
+		void set_private_member(const array2d<T>& a)
+    	{
+			array2d<T>::set_private_member(a);
+    	}
+        ~array2d_dp ()
+		{
+			array2d<T>::clear_private_member();
+        }
+    };
+#endif
 
     template <
         typename T,

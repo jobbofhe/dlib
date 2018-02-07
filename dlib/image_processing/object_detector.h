@@ -9,8 +9,17 @@
 #include "box_overlap_testing.h"
 #include "full_object_detection.h"
 
+#include<sys/time.h>
+
+
 namespace dlib
 {
+	long long currentTimeInMilliseconds()
+	{
+		struct timeval tv;
+		gettimeofday(&tv, NULL);
+		return ((tv.tv_sec * 1000) + (tv.tv_usec / 1000));
+	}
 
 // ----------------------------------------------------------------------------------------
 
@@ -254,6 +263,8 @@ namespace dlib
             deserialize(item.boxes_overlap, in);
             unsigned long num_detectors = 0;
             deserialize(num_detectors, in);
+			std::cout << __FUNCTION__ << " num_detectors = " << num_detectors << std::endl;
+			num_detectors = 1;
             item.w.resize(num_detectors);
             for (unsigned long i = 0; i < item.w.size(); ++i)
             {
@@ -430,9 +441,17 @@ namespace dlib
         double adjust_threshold
     ) 
     {
+		long long t0 = currentTimeInMilliseconds();
         scanner.load(img);
+		long long t1 = currentTimeInMilliseconds();
+		//std::cout << "t1-t0 take " << t1-t0 << " ms "<< std::endl;    
+		//LOGD("t1-t0 take %lld ms",t1-t0);     //hsq
+		
         std::vector<std::pair<double, rectangle> > dets;
         std::vector<rect_detection> dets_accum;
+		//long long t2 = currentTimeInMilliseconds();
+		//std::cout << "t2-t1 take " << t2-t1 << " ms "<< std::endl; 
+
         for (unsigned long i = 0; i < w.size(); ++i)
         {
             const double thresh = w[i].w(scanner.get_num_dimensions());
@@ -446,6 +465,9 @@ namespace dlib
                 dets_accum.push_back(temp);
             }
         }
+		long long t3 = currentTimeInMilliseconds();
+		//std::cout << "t3-t2 take " << t3-t2 << " ms "<< std::endl;    
+		//LOGD("t3-t1 take %lld ms",t3-t1);     //hsq
 
         // Do non-max suppression
         final_dets.clear();
@@ -458,6 +480,9 @@ namespace dlib
 
             final_dets.push_back(dets_accum[i]);
         }
+		long long t4 = currentTimeInMilliseconds();
+		//std::cout << "t4-t3 take " << t4-t3 << " ms "<< std::endl;  		
+		//LOGD("t4-t3 take %lld ms",t4-t3);     //hsq
     }
 
 // ----------------------------------------------------------------------------------------

@@ -9,6 +9,7 @@
 #include "../array.h"
 #include "../array2d.h"
 #include "object_detector.h"
+#include <pthread.h>
 
 namespace dlib
 {
@@ -237,6 +238,7 @@ namespace dlib
             const feature_vector_type& weights 
         ) const
         {
+			std::cout << " weights.size() = " << weights.size() << std::endl;
             // make sure requires clause is not broken
             DLIB_ASSERT(weights.size() >= get_num_dimensions(),
                 "\t fhog_filterbank scan_fhog_pyramid::build_fhog_filterbank()"
@@ -412,7 +414,10 @@ namespace dlib
 
     namespace impl
     {
-        template <typename fhog_filterbank>
+		long long total_pyr_time = 0;
+		long long total_fe_time = 0;
+		
+		template <typename fhog_filterbank>
         rectangle apply_filters_to_fhog (
             const fhog_filterbank& w,
             const array<array2d<float> >& feats,
@@ -555,7 +560,61 @@ namespace dlib
 
     namespace impl
     {
-        template <
+		template <
+            typename pixel_type,
+            typename feature_extractor_type,
+            typename image_type
+            >		
+		struct param_for_fill_in_feats
+		{
+			param_for_fill_in_feats(){}
+
+			feature_extractor_type* fe;
+			array<array2d<pixel_type>>* image_pyr;
+            array<array<array2d<float> > >* feats; 
+            int cell_size;
+            int filter_rows_padding;
+            int filter_cols_padding;
+			pthread_mutex_t mutex;
+			int feats_idx;
+		};
+
+		template <
+            typename pixel_type,
+            typename feature_extractor_type,
+            typename image_type
+            >
+        void* fill_in_feats (
+			void* ptr
+        ) 
+		{
+			param_for_fill_in_feats<pixel_type, feature_extractor_type, image_type>* p = (param_for_fill_in_feats<pixel_type, feature_extractor_type, image_type>*)ptr;
+			unsigned long i;
+			long long total_thread_time = 0;
+			while(1)
+			{
+				pthread_mutex_lock(&p->mutex);
+				i = p->feats_idx;
+				p->feats_idx++;
+				pthread_mutex_unlock(&p->mutex);
+				if(i < (*p->feats).size() )
+				{
+					long long t0 = currentTimeInMilliseconds();
+					(*p->fe)((*p->image_pyr)[i], (*p->feats)[i], p->cell_size,p->filter_rows_padding,p->filter_cols_padding); //hsq
+					long long t1 = currentTimeInMilliseconds();
+					total_thread_time += (t1-t0);
+				}
+				else
+				{
+					std::cout << " total_thread_time = " << total_thread_time <<" tid = " << pthread_self() << std::endl;
+					//LOGD("total_thread_time = %lld tid = %ld",total_thread_time,pthread_self());
+					break;
+				}
+			}
+			return NULL;
+		}
+		
+		template <
             typename pyramid_type,
             typename image_type,
             typename feature_extractor_type
@@ -587,11 +646,58 @@ namespace dlib
             if (feats.max_size() < levels)
                 feats.set_max_size(levels);
             feats.set_size(levels);
+			//std::cout << "feats.size() = " << feats.size() << std::endl;
+#if 1
+			typedef typename image_traits<image_type>::pixel_type pixel_type;
+			long long t0 = currentTimeInMilliseconds();
 
+			array<array2d<pixel_type>> image_pyr;
+			image_pyr.set_max_size(levels);
+			image_pyr.set_size(levels);
+			assign_image(image_pyr[0],img);
+			
+			for(int i=0;i<image_pyr.size()-1;i++)
+			{
+				pyr(image_pyr[i], image_pyr[i+1]);
+			}
+			long long t1 = currentTimeInMilliseconds();
 
+			impl::total_pyr_time = (t1-t0);
+			// build our feature pyramid
+			DLIB_ASSERT(feats[0].size() == fe.get_num_planes(), 
+				"Invalid feature extractor used with dlib::scan_fhog_pyramid.  The output does not have the \n"
+				"indicated number of planes.");
 
+			t0 = currentTimeInMilliseconds();
+			param_for_fill_in_feats<pixel_type, feature_extractor_type,image_type> param;
+			param.cell_size = cell_size;
+			param.fe = (feature_extractor_type*)&fe;
+			param.feats = &feats;
+			param.filter_cols_padding = filter_cols_padding;
+			param.filter_rows_padding = filter_rows_padding;
+			param.image_pyr = &image_pyr;
+			param.mutex = PTHREAD_MUTEX_INITIALIZER;
+			param.feats_idx = 0;
+			//fill_in_feats<pixel_type, feature_extractor_type>((void*)&param);
+			
+			int num_of_thread = 3;  //hsq ?им2a??3ими║yив?
+			pthread_t fill_in_fe_thread[num_of_thread];
+			for(int i=0;i<num_of_thread;i++)
+			{
+				pthread_create(&fill_in_fe_thread[i], NULL, &fill_in_feats<pixel_type, feature_extractor_type, image_type>, (void*)&param);
+			}
+			for(int i=0;i<num_of_thread;i++)
+			{	
+				pthread_join(fill_in_fe_thread[i], NULL);
+			}
+			t1 = currentTimeInMilliseconds();
+			impl::total_fe_time = (t1-t0);	
+#else
             // build our feature pyramid
+            long long t0 = currentTimeInMilliseconds();
             fe(img, feats[0], cell_size,filter_rows_padding,filter_cols_padding);
+			long long t1 = currentTimeInMilliseconds();
+			impl::total_fe_time += (t1-t0);
             DLIB_ASSERT(feats[0].size() == fe.get_num_planes(), 
                 "Invalid feature extractor used with dlib::scan_fhog_pyramid.  The output does not have the \n"
                 "indicated number of planes.");
@@ -600,17 +706,32 @@ namespace dlib
             {
                 typedef typename image_traits<image_type>::pixel_type pixel_type;
                 array2d<pixel_type> temp1, temp2;
+				long long t0 = currentTimeInMilliseconds();
                 pyr(img, temp1);
+				long long t1 = currentTimeInMilliseconds();
+				impl::total_pyr_time += (t1-t0);
                 fe(temp1, feats[1], cell_size,filter_rows_padding,filter_cols_padding);
+				long long t2 = currentTimeInMilliseconds();
+				impl::total_fe_time += (t2-t1);
                 swap(temp1,temp2);
 
                 for (unsigned long i = 2; i < feats.size(); ++i)
                 {
-                    pyr(temp2, temp1);
-                    fe(temp1, feats[i], cell_size,filter_rows_padding,filter_cols_padding);
+                    long long t0 = currentTimeInMilliseconds();
+					pyr(temp2, temp1);
+					long long t1 = currentTimeInMilliseconds();
+					impl::total_pyr_time += (t1-t0);
+                    t0 = currentTimeInMilliseconds();
+					fe(temp1, feats[i], cell_size,filter_rows_padding,filter_cols_padding);
+					t1 = currentTimeInMilliseconds();
+					impl::total_fe_time += (t1-t0);
                     swap(temp1,temp2);
                 }
             }
+#endif			
+			//std::cout << " total_pyr_time = " << impl::total_pyr_time << std::endl;
+			//std::cout << " total_fe_time = " << impl::total_fe_time << std::endl;
+//			LOGD("total_pyr_time = %lld total_fe_time = %lld",impl::total_pyr_time,impl::total_fe_time); //hsq
         }
     }
 
@@ -773,10 +894,11 @@ namespace dlib
             const int cell_size,
             const int filter_rows_padding,
             const int filter_cols_padding,
-            std::vector<std::pair<double, rectangle> >& dets
+            std::vector<std::pair<double, rectangle> >& dets,
+            bool clear = true
         ) 
         {
-            dets.clear();
+            if(clear) dets.clear();
 
             array2d<float> saliency_image;
             pyramid_type pyr;
@@ -794,7 +916,7 @@ namespace dlib
                         // if we found a detection
                         if (saliency_image[r][c] >= thresh)
                         {
-                            rectangle rect = fe.feats_to_image(centered_rect(point(c,r),det_box_width,det_box_height), 
+                            rectangle rect = fe.feats_to_image(centered_rect(point(c,r+feats[l][0].offset()),det_box_width,det_box_height), 
                                 cell_size, filter_rows_padding, filter_cols_padding);
                             rect = pyr.rect_up(rect, l);
                             dets.push_back(std::make_pair(saliency_image[r][c], rect));
@@ -822,6 +944,43 @@ namespace dlib
             return false;
         }
 
+		template <
+            typename fhog_filterbank,
+            typename feature_extractor_type
+            >
+		struct param_for_detect
+		{
+			param_for_detect(){}
+
+            array<array<array2d<float> > >* feats;
+            const feature_extractor_type* fe;
+            const fhog_filterbank* w;
+            double thresh;
+            unsigned long det_box_height;
+            unsigned long det_box_width;
+            int cell_size;
+            int filter_rows_padding;
+            int filter_cols_padding;
+            std::vector<std::pair<double, rectangle> >* dets;
+		};		
+
+		template <
+            typename fhog_filterbank,
+            typename feature_extractor_type,
+            typename pyramid_type
+            >
+		void* detect_from_fhog_pyramid_wrapper (
+			void* ptr
+		)
+		{
+			long long t0 = currentTimeInMilliseconds();
+			param_for_detect<fhog_filterbank, feature_extractor_type>* p = (param_for_detect<fhog_filterbank, feature_extractor_type>*)ptr;
+			impl::detect_from_fhog_pyramid<pyramid_type>(*(p->feats), *(p->fe), *(p->w), p->thresh,
+							p->det_box_height, p->det_box_width, p->cell_size, p->filter_rows_padding, p->filter_cols_padding, *(p->dets));
+			long long t1 = currentTimeInMilliseconds();
+			std::cout << "single thread finished time = " << t1-t0 << std::endl;				
+			return NULL;			
+		}		
     }
 
 // ----------------------------------------------------------------------------------------
@@ -851,8 +1010,74 @@ namespace dlib
         unsigned long width, height;
         compute_fhog_window_size(width,height);
 
-        impl::detect_from_fhog_pyramid<pyramid_type>(feats, fe, w, thresh,
-            height-2*padding, width-2*padding, cell_size, height, width, dets);
+		const int num_of_threads = 3;  //hsq 
+		long long t0 = currentTimeInMilliseconds();
+        array<array<array2d<float> >> feats_dp[num_of_threads];
+		std::vector<std::pair<double, rectangle> > dets_dp[num_of_threads];
+		for(int h=0;h<num_of_threads;h++)
+		{
+			feats_dp[h].set_max_size(feats.size());
+			feats_dp[h].set_size(feats.size());
+			for(int i=0;i<feats_dp[h].size();i++)
+			{
+				feats_dp[h][i].set_max_size(feats[i].size());
+				feats_dp[h][i].set_size(feats[i].size());
+				for(int j=0;j<feats_dp[h][i].size();j++)
+				{
+					feats_dp[h][i][j].set_private_member(feats[i][j]);
+					//std::cout << " h = " << h << " i = " << i << " j = " << j << "ret = " << feats_dp[h][i][j].config_by_tid(h,num_of_threads,height) << std::endl;
+					feats_dp[h][i][j].config_by_tid(h,num_of_threads,height);
+					//if (feats_dp[h][i][j].config_by_tid(h,num_of_threads,height) == -1)
+					//if(j == 0)
+					//{
+					//	std::cout << " h = " << h << " i = " << i << " nr = " << feats_dp[h][i][j].nr() << " ori nr = " << feats[i][j].nr() << std::endl;
+					//}
+				}
+			}
+		}
+		long long t1 = currentTimeInMilliseconds();
+		std::cout << "build feats time = " << t1-t0 << std::endl;
+		pthread_t detect_thread[num_of_threads];
+		impl::param_for_detect<fhog_filterbank, feature_extractor_type> param[num_of_threads];
+		for(int i=0;i<num_of_threads;i++)
+		{
+			param[i].feats = &feats_dp[i];
+			param[i].fe = &fe;
+			param[i].w = &w;
+			param[i].thresh = thresh;
+			param[i].det_box_height = height-2*padding;
+			param[i].det_box_width = width-2*padding;
+			param[i].cell_size = cell_size;
+			param[i].filter_rows_padding = height;
+			param[i].filter_cols_padding = width;
+			param[i].dets = &dets_dp[i];
+			pthread_create(&detect_thread[i], NULL, &impl::detect_from_fhog_pyramid_wrapper<fhog_filterbank, feature_extractor_type,pyramid_type>, (void*)&param[i]);
+		}
+		long long t2 = currentTimeInMilliseconds();
+		std::cout << "create threads time = " << t2-t1 << std::endl;		
+		for(int i=0;i<num_of_threads;i++)
+		{	
+			pthread_join(detect_thread[i], NULL);
+		}
+		long long t3 = currentTimeInMilliseconds();
+		std::cout << "wait for threads are finished time = " << t3-t2 << std::endl;		
+#if 0			
+		for(int h=0;h<num_of_threads;h++)
+		{
+			impl::detect_from_fhog_pyramid<pyramid_type>(feats_dp[h], fe, w, thresh,
+           		height-2*padding, width-2*padding, cell_size, height, width, dets_dp[h]);
+		}
+#endif
+		for(int h=0;h<num_of_threads;h++)
+		{
+			while(!dets_dp[h].empty())
+			{
+				dets.push_back(dets_dp[h].back());
+				dets_dp[h].pop_back();
+			}
+		}
+		long long t4 = currentTimeInMilliseconds();
+		std::cout << "build dets time = " << t4-t3 << std::endl;			
     }
 
 // ----------------------------------------------------------------------------------------
@@ -1306,6 +1531,7 @@ namespace dlib
 
 
         // Do non-max suppression
+        dets.clear();
         if (detectors.size() > 1)
             std::sort(dets_accum.rbegin(), dets_accum.rend());
         for (unsigned long i = 0; i < dets_accum.size(); ++i)
